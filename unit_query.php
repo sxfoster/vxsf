@@ -240,8 +240,11 @@ if ($to !== null && $to !== '') {
     $where[] = "LastModifiedDate <= {$to}T23:59:59Z";
 }
 
+$maxLimit = 200;
 $limit = $_GET['limit'] ?? null;
-if ($limit !== null && $limit !== '') {
+if ($limit === null || $limit === '') {
+    $limit = $maxLimit;
+} else {
     if (filter_var($limit, FILTER_VALIDATE_INT) === false) {
         http_response_code(400);
         echo json_encode([
@@ -251,11 +254,11 @@ if ($limit !== null && $limit !== '') {
         exit;
     }
     $limit = (int) $limit;
-    if ($limit < 1 || $limit > 2000) {
+    if ($limit < 1 || $limit > $maxLimit) {
         http_response_code(400);
         echo json_encode([
             'error' => 'invalid_limit',
-            'message' => 'limit must be between 1 and 2000.',
+            'message' => "limit must be between 1 and {$maxLimit}.",
         ]);
         exit;
     }
@@ -265,9 +268,7 @@ if ($where) {
     $soql .= ' WHERE ' . implode(' AND ', $where);
 }
 
-if ($limit !== null && $limit !== '') {
-    $soql .= " LIMIT {$limit}";
-}
+$soql .= " LIMIT {$limit}";
 
 $cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($soql) . '.json';
 $cacheTtlSeconds = 300;
