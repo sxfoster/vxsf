@@ -4,6 +4,33 @@
 
 declare(strict_types=1);
 
+$expectedToken = getenv('UNIT_QUERY_API_KEY') ?: 'REPLACE_WITH_A_LONG_RANDOM_SECRET';
+
+// Grab Authorization header
+$auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+if (!$auth) {
+    http_response_code(401);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Missing Authorization header']);
+    exit;
+}
+
+// Expect: Authorization: Bearer <token>
+if (!preg_match('/^Bearer\s+(.+)$/i', trim($auth), $m)) {
+    http_response_code(401);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Invalid Authorization format']);
+    exit;
+}
+
+$token = trim($m[1]);
+if (!hash_equals($expectedToken, $token)) {
+    http_response_code(403);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Forbidden']);
+    exit;
+}
+
 header('Content-Type: application/json; charset=utf-8');
 
 $instanceBase = 'https://nosoftware-platform-1391.my.salesforce.com';
@@ -16,12 +43,12 @@ $soql = "SELECT Id,Name,Status__c,Sub_Status__c,Unit_Offline__c,Model__c,GPS_IME
 
 // Token retrieval (preferred: protected file under web root)
 $tokenFile = getenv('SF_BEARER_TOKEN_FILE') ?: (__DIR__ . '/.secrets/sf_bearer_token');
-$token = null;
+$sfToken = null;
 if (is_readable($tokenFile)) {
-    $token = trim((string) file_get_contents($tokenFile));
+    $sfToken = trim((string) file_get_contents($tokenFile));
 }
 
-if (!$token) {
+if (!$sfToken) {
     http_response_code(400);
     echo json_encode([
         'error' => 'missing_token',
@@ -36,7 +63,7 @@ $ch = curl_init($url);
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_HTTPHEADER => [
-        "Authorization: Bearer {$token}",
+        "Authorization: Bearer {$sfToken}",
         'Accept: application/json',
     ],
     CURLOPT_TIMEOUT => 30,
