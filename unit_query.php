@@ -14,24 +14,18 @@ $soql = "SELECT Id,Name,Status__c,Sub_Status__c,Unit_Offline__c,Model__c,GPS_IME
     . "Spot_Ai_Serial_Number__c,Starlink_Serial_Number__c,Carbo_Gx_Serial_Number__c,LastModifiedDate "
     . "FROM Unit__c";
 
-// Token retrieval (preferred: env var)
-$token = getenv('SF_BEARER_TOKEN');
-
-// Optional: allow header token for dev use
-if (!$token) {
-    $headers = function_exists('getallheaders') ? getallheaders() : [];
-    if (isset($headers['X-SF-Token'])) {
-        $token = $headers['X-SF-Token'];
-    } elseif (isset($headers['x-sf-token'])) {
-        $token = $headers['x-sf-token'];
-    }
+// Token retrieval (preferred: protected file under web root)
+$tokenFile = getenv('SF_BEARER_TOKEN_FILE') ?: (__DIR__ . '/.secrets/sf_bearer_token');
+$token = null;
+if (is_readable($tokenFile)) {
+    $token = trim((string) file_get_contents($tokenFile));
 }
 
 if (!$token) {
     http_response_code(400);
     echo json_encode([
         'error' => 'missing_token',
-        'message' => 'Provide SF_BEARER_TOKEN env var (preferred) or X-SF-Token header (dev only).',
+        'message' => 'Provide a readable SF_BEARER_TOKEN_FILE with the bearer token (default: ./.secrets/sf_bearer_token).',
     ]);
     exit;
 }
