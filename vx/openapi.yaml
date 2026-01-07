@@ -3,7 +3,6 @@ info:
   title: VX Unit Query API
   version: 1.0.0
   description: Retrieve unit query data for analysis.
-
 servers:
   - url: https://aoa.rabbitholesolution.com/vx
 
@@ -12,6 +11,78 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+
+  schemas:
+    UnitQueryResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        totalSize:
+          type: integer
+          description: Total number of matching records.
+        done:
+          type: boolean
+          description: Whether the query is complete.
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnitRecord"
+      required: [totalSize, done, records]
+
+    UnitRecord:
+      type: object
+      description: A Unit__c record.
+      # We define known fields, but allow SF/custom fields too.
+      additionalProperties: true
+      properties:
+        attributes:
+          $ref: "#/components/schemas/SFAttributes"
+        Id:
+          type: string
+        Name:
+          type: string
+          nullable: true
+        Status__c:
+          type: string
+          nullable: true
+        Sub_Status__c:
+          type: string
+          nullable: true
+        Unit_Offline__c:
+          type: boolean
+          nullable: true
+        Model__c:
+          type: string
+          nullable: true
+        GPS_IMEI__c:
+          type: string
+          nullable: true
+        GPS_URL__c:
+          type: string
+          nullable: true
+        Spot_Ai_Serial_Number__c:
+          type: string
+          nullable: true
+        Starlink_Serial_Number__c:
+          type: string
+          nullable: true
+        Carbo_Gx_Serial_Number__c:
+          type: string
+          nullable: true
+        LastModifiedDate:
+          type: string
+          nullable: true
+          description: Salesforce datetime string.
+
+    SFAttributes:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+        url:
+          type: string
+      required: [type, url]
 
 security:
   - bearerAuth: []
@@ -28,7 +99,7 @@ paths:
           required: false
           schema:
             type: string
-          description: Optional unit identifier to filter results.
+          description: Optional unit identifier filter.
         - name: from
           in: query
           required: false
@@ -49,12 +120,11 @@ paths:
           description: Optional limit to keep payload small.
       responses:
         "200":
-          description: JSON payload with unit data
+          description: Salesforce-style query response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/UnitQueryResponse"
         "401":
           description: Unauthorized
         "403":
