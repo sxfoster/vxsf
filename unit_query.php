@@ -62,7 +62,82 @@ $soql = "SELECT Id,Name,Status__c,Sub_Status__c,Unit_Offline__c,Model__c,GPS_IME
     . "Spot_Ai_Serial_Number__c,Starlink_Serial_Number__c,Carbo_Gx_Serial_Number__c,LastModifiedDate "
     . "FROM Unit__c";
 
-$cacheFile = __DIR__ . '/.cache/unit_query.json';
+$where = [];
+
+$unitId = $_GET['unit_id'] ?? null;
+if ($unitId !== null && $unitId !== '') {
+    $unitId = trim((string) $unitId);
+    if (!preg_match('/^[a-zA-Z0-9]{15,18}$/', $unitId)) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_unit_id',
+            'message' => 'unit_id must be a 15-18 character Salesforce ID.',
+        ]);
+        exit;
+    }
+    $where[] = "Id = '{$unitId}'";
+}
+
+$from = $_GET['from'] ?? null;
+if ($from !== null && $from !== '') {
+    $from = trim((string) $from);
+    $fromDate = DateTime::createFromFormat('Y-m-d', $from);
+    if (!$fromDate || $fromDate->format('Y-m-d') !== $from) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_from',
+            'message' => 'from must be in YYYY-MM-DD format.',
+        ]);
+        exit;
+    }
+    $where[] = "LastModifiedDate >= {$from}T00:00:00Z";
+}
+
+$to = $_GET['to'] ?? null;
+if ($to !== null && $to !== '') {
+    $to = trim((string) $to);
+    $toDate = DateTime::createFromFormat('Y-m-d', $to);
+    if (!$toDate || $toDate->format('Y-m-d') !== $to) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_to',
+            'message' => 'to must be in YYYY-MM-DD format.',
+        ]);
+        exit;
+    }
+    $where[] = "LastModifiedDate <= {$to}T23:59:59Z";
+}
+
+$limit = $_GET['limit'] ?? null;
+if ($limit !== null && $limit !== '') {
+    if (filter_var($limit, FILTER_VALIDATE_INT) === false) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_limit',
+            'message' => 'limit must be an integer.',
+        ]);
+        exit;
+    }
+    $limit = (int) $limit;
+    if ($limit < 1 || $limit > 2000) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_limit',
+            'message' => 'limit must be between 1 and 2000.',
+        ]);
+        exit;
+    }
+}
+
+if ($where) {
+    $soql .= ' WHERE ' . implode(' AND ', $where);
+}
+
+if ($limit !== null && $limit !== '') {
+    $soql .= " LIMIT {$limit}";
+}
+
+$cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($soql) . '.json';
 $cacheTtlSeconds = 300;
 
 // Token retrieval (preferred: protected file under web root)
