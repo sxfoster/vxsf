@@ -4,6 +4,55 @@
 
 declare(strict_types=1);
 
+function normalizeFilterValue(mixed $value): mixed
+{
+    if ($value === null) {
+        return null;
+    }
+    if (is_array($value)) {
+        return array_map('normalizeFilterValue', $value);
+    }
+    if (is_bool($value) || is_int($value) || is_float($value)) {
+        return $value;
+    }
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    return mb_substr($value, 0, 200);
+}
+
+function extractRecordCount(mixed $payload): ?int
+{
+    if (!is_array($payload)) {
+        return null;
+    }
+    if (isset($payload['totalSize']) && is_numeric($payload['totalSize'])) {
+        return (int) $payload['totalSize'];
+    }
+    if (isset($payload['records']) && is_array($payload['records'])) {
+        return count($payload['records']);
+    }
+    return null;
+}
+
+function logUnitQuery(array $filters, ?int $recordCount, bool $cached): void
+{
+    $payload = [
+        'event' => 'unit_query',
+        'filters' => $filters,
+        'records_returned' => $recordCount,
+        'cached' => $cached,
+        'timestamp' => gmdate('c'),
+    ];
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    if ($encoded === false) {
+        error_log('{"event":"unit_query","error":"log_encode_failed"}');
+        return;
+    }
+    error_log($encoded);
+}
+
 $expectedToken = getenv('UNIT_QUERY_API_KEY');
 if (!$expectedToken || $expectedToken === 'REPLACE_WITH_A_LONG_RANDOM_SECRET') {
     http_response_code(500);
@@ -137,6 +186,15 @@ if ($limit !== null && $limit !== '') {
     $soql .= " LIMIT {$limit}";
 }
 
+$filters = [
+    'status' => normalizeFilterValue($_GET['status'] ?? null),
+    'sub_status' => normalizeFilterValue($_GET['sub_status'] ?? null),
+    'offline' => normalizeFilterValue($_GET['offline'] ?? null),
+    'modified_since' => normalizeFilterValue($_GET['modified_since'] ?? null),
+    'fields' => normalizeFilterValue($_GET['fields'] ?? null),
+    'limit' => $limit,
+];
+
 $cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($soql) . '.json';
 $cacheTtlSeconds = 300;
 
@@ -160,7 +218,10 @@ if (is_readable($cacheFile)) {
     $cacheMtime = filemtime($cacheFile);
     if ($cacheMtime !== false && (time() - $cacheMtime) < $cacheTtlSeconds) {
         http_response_code(200);
-        echo (string) file_get_contents($cacheFile);
+        $cacheBody = (string) file_get_contents($cacheFile);
+        $cachedPayload = json_decode($cacheBody, true);
+        logUnitQuery($filters, extractRecordCount($cachedPayload), true);
+        echo $cacheBody;
         exit;
     }
 }
@@ -190,8 +251,10 @@ if ($curlErrNo) {
         http_response_code(200);
         if (is_array($cachedPayload)) {
             $cachedPayload['cached'] = true;
+            logUnitQuery($filters, extractRecordCount($cachedPayload), true);
             echo json_encode($cachedPayload);
         } else {
+            logUnitQuery($filters, null, true);
             echo json_encode([
                 'cached' => true,
                 'data' => $cacheBody,
@@ -216,8 +279,10 @@ if ($httpCode < 200 || $httpCode >= 300) {
         http_response_code(200);
         if (is_array($cachedPayload)) {
             $cachedPayload['cached'] = true;
+            logUnitQuery($filters, extractRecordCount($cachedPayload), true);
             echo json_encode($cachedPayload);
         } else {
+            logUnitQuery($filters, null, true);
             echo json_encode([
                 'cached' => true,
                 'data' => $cacheBody,
@@ -245,4 +310,5 @@ if (!is_dir($cacheDir)) {
 }
 file_put_contents($cacheFile, $responseBody, LOCK_EX);
 http_response_code(200);
+logUnitQuery($filters, extractRecordCount(json_decode($responseBody, true)), false);
 echo $responseBody;
