@@ -8,6 +8,55 @@
 
 declare(strict_types=1);
 
+function normalizeFilterValue(mixed $value): mixed
+{
+    if ($value === null) {
+        return null;
+    }
+    if (is_array($value)) {
+        return array_map('normalizeFilterValue', $value);
+    }
+    if (is_bool($value) || is_int($value) || is_float($value)) {
+        return $value;
+    }
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    return mb_substr($value, 0, 200);
+}
+
+function extractRecordCount(mixed $payload): ?int
+{
+    if (!is_array($payload)) {
+        return null;
+    }
+    if (isset($payload['totalSize']) && is_numeric($payload['totalSize'])) {
+        return (int) $payload['totalSize'];
+    }
+    if (isset($payload['records']) && is_array($payload['records'])) {
+        return count($payload['records']);
+    }
+    return null;
+}
+
+function logUnitQuery(array $filters, ?int $recordCount, bool $cached): void
+{
+    $payload = [
+        'event' => 'unit_query',
+        'filters' => $filters,
+        'records_returned' => $recordCount,
+        'cached' => $cached,
+        'timestamp' => gmdate('c'),
+    ];
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    if ($encoded === false) {
+        error_log('{"event":"unit_query","error":"log_encode_failed"}');
+        return;
+    }
+    error_log($encoded);
+}
+
 $expectedToken = getenv('UNIT_QUERY_API_KEY');
 if (!$expectedToken || $expectedToken === 'REPLACE_WITH_A_LONG_RANDOM_SECRET') {
     http_response_code(500);
@@ -61,6 +110,33 @@ header('Content-Type: application/json; charset=utf-8');
 $instanceBase = 'https://nosoftware-platform-1391.my.salesforce.com';
 $apiVersion = 'v61.0';
 
+function abortBadRequest(string $error, string $message): void
+{
+    http_response_code(400);
+    echo json_encode([
+        'error' => $error,
+        'message' => $message,
+    ]);
+    exit;
+}
+
+function parseCsvParam(string $rawValue, string $error, string $message): array
+{
+    $parts = explode(',', $rawValue);
+    $values = [];
+    foreach ($parts as $part) {
+        $value = trim($part);
+        if ($value === '') {
+            abortBadRequest($error, $message);
+        }
+        $values[] = $value;
+    }
+    if (!$values) {
+        abortBadRequest($error, $message);
+    }
+    return array_values(array_unique($values));
+}
+
 // SOQL query (unencoded)
 $allowedFields = [
     'Id',
@@ -83,23 +159,17 @@ $defaultStatus = 'Deployed';
 
 $fieldsParam = $_GET['fields'] ?? null;
 if ($fieldsParam !== null && $fieldsParam !== '') {
-    $requestedFields = array_filter(array_map('trim', explode(',', (string) $fieldsParam)), 'strlen');
-    if (!$requestedFields) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_fields',
-            'message' => 'fields must include at least one field name.',
-        ]);
-        exit;
-    }
+    $requestedFields = parseCsvParam(
+        (string) $fieldsParam,
+        'invalid_fields',
+        'fields must include at least one field name.'
+    );
     $unknownFields = array_diff($requestedFields, $allowedFields);
     if ($unknownFields) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_fields',
-            'message' => 'Unknown field(s): ' . implode(', ', $unknownFields) . '.',
-        ]);
-        exit;
+        abortBadRequest(
+            'invalid_fields',
+            'Unknown field(s): ' . implode(', ', $unknownFields) . '.'
+        );
     }
     $selectFields = $requestedFields;
 } else {
@@ -127,15 +197,11 @@ if ($unitId !== null && $unitId !== '') {
 $status = $_GET['status'] ?? null;
 $nextCursorParam = $_GET['next_cursor'] ?? null;
 if ($status !== null && $status !== '') {
-    $statusValues = array_filter(array_map('trim', explode(',', (string) $status)), 'strlen');
-    if (!$statusValues) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_status',
-            'message' => 'status must be a comma-separated list of values.',
-        ]);
-        exit;
-    }
+    $statusValues = parseCsvParam(
+        (string) $status,
+        'invalid_status',
+        'status must be a comma-separated list of values.'
+    );
     $escaped = array_map(
         static fn (string $value): string => str_replace("'", "\\'", $value),
         $statusValues
@@ -147,15 +213,11 @@ if ($status !== null && $status !== '') {
 
 $subStatus = $_GET['sub_status'] ?? null;
 if ($subStatus !== null && $subStatus !== '') {
-    $subStatusValues = array_filter(array_map('trim', explode(',', (string) $subStatus)), 'strlen');
-    if (!$subStatusValues) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_sub_status',
-            'message' => 'sub_status must be a comma-separated list of values.',
-        ]);
-        exit;
-    }
+    $subStatusValues = parseCsvParam(
+        (string) $subStatus,
+        'invalid_sub_status',
+        'sub_status must be a comma-separated list of values.'
+    );
     $escaped = array_map(
         static fn (string $value): string => str_replace("'", "\\'", $value),
         $subStatusValues
@@ -163,16 +225,28 @@ if ($subStatus !== null && $subStatus !== '') {
     $where[] = "Sub_Status__c IN ('" . implode("','", $escaped) . "')";
 }
 
+$model = $_GET['model'] ?? null;
+if ($model !== null && $model !== '') {
+    $modelValues = parseCsvParam(
+        (string) $model,
+        'invalid_model',
+        'model must be a comma-separated list of values.'
+    );
+    $escaped = array_map(
+        static fn (string $value): string => str_replace("'", "\\'", $value),
+        $modelValues
+    );
+    $where[] = "Model__c IN ('" . implode("','", $escaped) . "')";
+}
+
 $offline = $_GET['offline'] ?? null;
 if ($offline !== null && $offline !== '') {
     $normalized = strtolower(trim((string) $offline));
     if (!in_array($normalized, ['true', 'false'], true)) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_offline',
-            'message' => 'offline must be true or false.',
-        ]);
-        exit;
+        abortBadRequest(
+            'invalid_offline',
+            'offline must be true or false.'
+        );
     }
     $where[] = "Unit_Offline__c = {$normalized}";
 }
@@ -183,12 +257,10 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
     if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $modifiedSince)) {
         $date = DateTimeImmutable::createFromFormat('Y-m-d', $modifiedSince);
         if (!$date || $date->format('Y-m-d') !== $modifiedSince) {
-            http_response_code(400);
-            echo json_encode([
-                'error' => 'invalid_modified_since',
-                'message' => 'modified_since must be a valid date in YYYY-MM-DD format.',
-            ]);
-            exit;
+            abortBadRequest(
+                'invalid_modified_since',
+                'modified_since must be a valid date in YYYY-MM-DD format.'
+            );
         }
         $dateUtc = $date->setTimezone(new DateTimeZone('UTC'));
         $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
@@ -199,22 +271,18 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
             $dateTime = false;
         }
         if (!$dateTime) {
-            http_response_code(400);
-            echo json_encode([
-                'error' => 'invalid_modified_since',
-                'message' => 'modified_since must be a valid ISO datetime.',
-            ]);
-            exit;
+            abortBadRequest(
+                'invalid_modified_since',
+                'modified_since must be a valid ISO datetime.'
+            );
         }
         $dateUtc = $dateTime->setTimezone(new DateTimeZone('UTC'));
         $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
     } else {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_modified_since',
-            'message' => 'modified_since must be a date (YYYY-MM-DD) or ISO datetime.',
-        ]);
-        exit;
+        abortBadRequest(
+            'invalid_modified_since',
+            'modified_since must be a date (YYYY-MM-DD) or ISO datetime.'
+        );
     }
 }
 
@@ -309,6 +377,13 @@ if ($nextCursor !== null && $nextCursor !== '') {
     $hasFrom = $from !== null && $from !== '';
     $hasTo = $to !== null && $to !== '';
     if ($limitProvided || $offset !== null || $hasUnitId || $hasFrom || $hasTo) {
+    $hasStatus = $status !== null && $status !== '';
+    $hasSubStatus = $subStatus !== null && $subStatus !== '';
+    $hasModel = $model !== null && $model !== '';
+    $hasOffline = $offline !== null && $offline !== '';
+    $hasModifiedSince = $modifiedSince !== null && $modifiedSince !== '';
+    $hasFields = $fieldsParam !== null && $fieldsParam !== '';
+    if ($limit !== null || $offset !== null || $hasUnitId || $hasFrom || $hasTo || $hasStatus || $hasSubStatus || $hasModel || $hasOffline || $hasModifiedSince || $hasFields) {
         http_response_code(400);
         echo json_encode([
             'error' => 'invalid_next_cursor_usage',
@@ -327,6 +402,15 @@ $soql .= " LIMIT {$limit}";
 if ($offset !== null && $offset !== '') {
     $soql .= " OFFSET {$offset}";
 }
+
+$filters = [
+    'status' => normalizeFilterValue($_GET['status'] ?? null),
+    'sub_status' => normalizeFilterValue($_GET['sub_status'] ?? null),
+    'offline' => normalizeFilterValue($_GET['offline'] ?? null),
+    'modified_since' => normalizeFilterValue($_GET['modified_since'] ?? null),
+    'fields' => normalizeFilterValue($_GET['fields'] ?? null),
+    'limit' => $limit,
+];
 
 $cacheKey = $nextCursor ? "cursor:{$nextCursor}" : $soql;
 $cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($cacheKey) . '.json';
@@ -352,7 +436,10 @@ if (is_readable($cacheFile)) {
     $cacheMtime = filemtime($cacheFile);
     if ($cacheMtime !== false && (time() - $cacheMtime) < $cacheTtlSeconds) {
         http_response_code(200);
-        echo (string) file_get_contents($cacheFile);
+        $cacheBody = (string) file_get_contents($cacheFile);
+        $cachedPayload = json_decode($cacheBody, true);
+        logUnitQuery($filters, extractRecordCount($cachedPayload), true);
+        echo $cacheBody;
         exit;
     }
 }
@@ -404,8 +491,10 @@ if ($curlErrNo) {
         http_response_code(200);
         if (is_array($cachedPayload)) {
             $cachedPayload['cached'] = true;
+            logUnitQuery($filters, extractRecordCount($cachedPayload), true);
             echo json_encode($cachedPayload);
         } else {
+            logUnitQuery($filters, null, true);
             echo json_encode([
                 'cached' => true,
                 'data' => $cacheBody,
@@ -430,8 +519,10 @@ if ($httpCode < 200 || $httpCode >= 300) {
         http_response_code(200);
         if (is_array($cachedPayload)) {
             $cachedPayload['cached'] = true;
+            logUnitQuery($filters, extractRecordCount($cachedPayload), true);
             echo json_encode($cachedPayload);
         } else {
+            logUnitQuery($filters, null, true);
             echo json_encode([
                 'cached' => true,
                 'data' => $cacheBody,
@@ -486,4 +577,5 @@ if (is_array($payload)) {
 }
 file_put_contents($cacheFile, $responseBody, LOCK_EX);
 http_response_code(200);
+logUnitQuery($filters, extractRecordCount(json_decode($responseBody, true)), false);
 echo $responseBody;

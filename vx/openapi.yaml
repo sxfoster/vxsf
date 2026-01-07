@@ -92,6 +92,7 @@ paths:
     get:
       operationId: getUnitQuery
       summary: Get unit query data (JSON) for analysis
+      description: Always apply filters and keep limit small to reduce payload size and latency.
       x-openai-isConsequential: false
       parameters:
         - name: unit_id
@@ -118,6 +119,54 @@ paths:
           schema:
             type: integer
           description: Optional limit to keep payload small.
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional status filter. Accepts a single value or CSV list (e.g. "active,inactive").
+        - name: sub_status
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional sub-status filter. Accepts a single value or CSV list.
+        - name: offline
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Optional boolean filter; when true returns only offline units, when false only online units.
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional model filter. Accepts a single value or CSV list.
+        - name: modified_since
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional ISO-8601 timestamp to return units modified after the given time.
+        - name: fields
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional CSV projection of fields to return; include only needed fields to reduce payload.
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Optional paging offset; use with limit for page-based pagination (omit if using cursor).
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional paging cursor token for cursor-based pagination (omit if using offset).
       responses:
         "200":
           description: Salesforce-style query response
