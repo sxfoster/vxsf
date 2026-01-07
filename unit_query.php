@@ -89,6 +89,39 @@ function parseCsvParam(string $rawValue, string $error, string $message): array
     return array_values(array_unique($values));
 }
 
+function enforceAllowlist(array $values, array $allowlist, string $error, string $message): array
+{
+    $invalid = array_diff($values, $allowlist);
+    if ($invalid) {
+        abortBadRequest(
+            $error,
+            $message . ' Invalid value(s): ' . implode(', ', $invalid) . '.'
+        );
+    }
+    return $values;
+}
+
+function quoteSoqlString(string $value): string
+{
+    return "'" . str_replace(["\\", "'"], ["\\\\", "\\'"], $value) . "'";
+}
+
+function parseAllowlistEnv(string $envKey, array $defaults): array
+{
+    $raw = getenv($envKey);
+    if ($raw === false || trim($raw) === '') {
+        return $defaults;
+    }
+    $values = [];
+    foreach (explode(',', $raw) as $part) {
+        $value = trim($part);
+        if ($value !== '') {
+            $values[] = $value;
+        }
+    }
+    return array_values(array_unique($values));
+}
+
 // SOQL query (unencoded)
 $allowedFields = [
     'Id',
@@ -108,6 +141,28 @@ $defaultFields = [
     'LastModifiedDate',
 ];
 $defaultStatus = 'Deployed';
+$allowedStatusValues = parseAllowlistEnv('UNIT_QUERY_ALLOWED_STATUS', [
+    'Deployed',
+    'Active',
+    'Inactive',
+    'Maintenance',
+    'Staged',
+    'Retired',
+]);
+$allowedSubStatusValues = parseAllowlistEnv('UNIT_QUERY_ALLOWED_SUB_STATUS', [
+    'Operational',
+    'Maintenance',
+    'Repair',
+    'Storage',
+    'Testing',
+    'Transit',
+]);
+$allowedModelValues = parseAllowlistEnv('UNIT_QUERY_ALLOWED_MODEL', [
+    'VX-1',
+    'VX-2',
+    'VX-3',
+    'VX-4',
+]);
 
 $fieldsParam = $_GET['fields'] ?? null;
 if ($fieldsParam !== null && $fieldsParam !== '') {
@@ -154,13 +209,16 @@ if ($status !== null && $status !== '') {
         'invalid_status',
         'status must be a comma-separated list of values.'
     );
-    $escaped = array_map(
-        static fn (string $value): string => str_replace("'", "\\'", $value),
-        $statusValues
+    $statusValues = enforceAllowlist(
+        $statusValues,
+        $allowedStatusValues,
+        'invalid_status',
+        'status must be a comma-separated list of allowed values.'
     );
-    $where[] = "Status__c IN ('" . implode("','", $escaped) . "')";
+    $quoted = array_map('quoteSoqlString', $statusValues);
+    $where[] = 'Status__c IN (' . implode(',', $quoted) . ')';
 } elseif (($unitId === null || $unitId === '') && ($nextCursorParam === null || $nextCursorParam === '')) {
-    $where[] = "Status__c = '{$defaultStatus}'";
+    $where[] = 'Status__c = ' . quoteSoqlString($defaultStatus);
 }
 
 $subStatus = $_GET['sub_status'] ?? null;
@@ -170,11 +228,14 @@ if ($subStatus !== null && $subStatus !== '') {
         'invalid_sub_status',
         'sub_status must be a comma-separated list of values.'
     );
-    $escaped = array_map(
-        static fn (string $value): string => str_replace("'", "\\'", $value),
-        $subStatusValues
+    $subStatusValues = enforceAllowlist(
+        $subStatusValues,
+        $allowedSubStatusValues,
+        'invalid_sub_status',
+        'sub_status must be a comma-separated list of allowed values.'
     );
-    $where[] = "Sub_Status__c IN ('" . implode("','", $escaped) . "')";
+    $quoted = array_map('quoteSoqlString', $subStatusValues);
+    $where[] = 'Sub_Status__c IN (' . implode(',', $quoted) . ')';
 }
 
 $model = $_GET['model'] ?? null;
@@ -184,11 +245,14 @@ if ($model !== null && $model !== '') {
         'invalid_model',
         'model must be a comma-separated list of values.'
     );
-    $escaped = array_map(
-        static fn (string $value): string => str_replace("'", "\\'", $value),
-        $modelValues
+    $modelValues = enforceAllowlist(
+        $modelValues,
+        $allowedModelValues,
+        'invalid_model',
+        'model must be a comma-separated list of allowed values.'
     );
-    $where[] = "Model__c IN ('" . implode("','", $escaped) . "')";
+    $quoted = array_map('quoteSoqlString', $modelValues);
+    $where[] = 'Model__c IN (' . implode(',', $quoted) . ')';
 }
 
 $offline = $_GET['offline'] ?? null;
@@ -215,7 +279,7 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
             );
         }
         $dateUtc = $date->setTimezone(new DateTimeZone('UTC'));
-        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+        $where[] = 'LastModifiedDate >= ' . quoteSoqlString($dateUtc->format('Y-m-d\TH:i:s\Z'));
     } elseif (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/', $modifiedSince)) {
         try {
             $dateTime = new DateTimeImmutable($modifiedSince);
@@ -229,7 +293,7 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
             );
         }
         $dateUtc = $dateTime->setTimezone(new DateTimeZone('UTC'));
-        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+        $where[] = 'LastModifiedDate >= ' . quoteSoqlString($dateUtc->format('Y-m-d\TH:i:s\Z'));
     } else {
         abortBadRequest(
             'invalid_modified_since',
@@ -241,31 +305,29 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
 $from = $_GET['from'] ?? null;
 if ($from !== null && $from !== '') {
     $from = trim((string) $from);
-    $fromDate = DateTime::createFromFormat('Y-m-d', $from);
+    $fromDate = DateTimeImmutable::createFromFormat('Y-m-d', $from, new DateTimeZone('UTC'));
     if (!$fromDate || $fromDate->format('Y-m-d') !== $from) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_from',
-            'message' => 'from must be in YYYY-MM-DD format.',
-        ]);
-        exit;
+        abortBadRequest(
+            'invalid_from',
+            'from must be in YYYY-MM-DD format.'
+        );
     }
-    $where[] = "LastModifiedDate >= {$from}T00:00:00Z";
+    $fromDateTime = $fromDate->setTime(0, 0, 0);
+    $where[] = 'LastModifiedDate >= ' . quoteSoqlString($fromDateTime->format('Y-m-d\TH:i:s\Z'));
 }
 
 $to = $_GET['to'] ?? null;
 if ($to !== null && $to !== '') {
     $to = trim((string) $to);
-    $toDate = DateTime::createFromFormat('Y-m-d', $to);
+    $toDate = DateTimeImmutable::createFromFormat('Y-m-d', $to, new DateTimeZone('UTC'));
     if (!$toDate || $toDate->format('Y-m-d') !== $to) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_to',
-            'message' => 'to must be in YYYY-MM-DD format.',
-        ]);
-        exit;
+        abortBadRequest(
+            'invalid_to',
+            'to must be in YYYY-MM-DD format.'
+        );
     }
-    $where[] = "LastModifiedDate <= {$to}T23:59:59Z";
+    $toDateTime = $toDate->setTime(23, 59, 59);
+    $where[] = 'LastModifiedDate <= ' . quoteSoqlString($toDateTime->format('Y-m-d\TH:i:s\Z'));
 }
 
 $maxLimit = 200;
@@ -328,14 +390,13 @@ if ($nextCursor !== null && $nextCursor !== '') {
     $hasUnitId = $unitId !== null && $unitId !== '';
     $hasFrom = $from !== null && $from !== '';
     $hasTo = $to !== null && $to !== '';
-    if ($limitProvided || $offset !== null || $hasUnitId || $hasFrom || $hasTo) {
     $hasStatus = $status !== null && $status !== '';
     $hasSubStatus = $subStatus !== null && $subStatus !== '';
     $hasModel = $model !== null && $model !== '';
     $hasOffline = $offline !== null && $offline !== '';
     $hasModifiedSince = $modifiedSince !== null && $modifiedSince !== '';
     $hasFields = $fieldsParam !== null && $fieldsParam !== '';
-    if ($limit !== null || $offset !== null || $hasUnitId || $hasFrom || $hasTo || $hasStatus || $hasSubStatus || $hasModel || $hasOffline || $hasModifiedSince || $hasFields) {
+    if ($limitProvided || $offset !== null || $hasUnitId || $hasFrom || $hasTo || $hasStatus || $hasSubStatus || $hasModel || $hasOffline || $hasModifiedSince || $hasFields) {
         http_response_code(400);
         echo json_encode([
             'error' => 'invalid_next_cursor_usage',
