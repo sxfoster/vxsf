@@ -1,6 +1,10 @@
 <?php
 // unit_query.php
 // Simple endpoint that queries Salesforce Unit__c records and returns JSON.
+// Pagination query params:
+// - limit: max rows (1-2000) when using offset pagination.
+// - offset: zero-based offset (0-2000); requires limit.
+// - next_cursor: Salesforce nextRecordsUrl (relative or full) for query continuation.
 
 declare(strict_types=1);
 
@@ -264,13 +268,63 @@ if ($limit === null || $limit === '') {
     }
 }
 
+$offset = $_GET['offset'] ?? null;
+if ($offset !== null && $offset !== '') {
+    if (filter_var($offset, FILTER_VALIDATE_INT) === false) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_offset',
+            'message' => 'offset must be an integer.',
+        ]);
+        exit;
+    }
+    $offset = (int) $offset;
+    if ($offset < 0 || $offset > 2000) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_offset',
+            'message' => 'offset must be between 0 and 2000.',
+        ]);
+        exit;
+    }
+    if ($limit === null || $limit === '') {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'offset_requires_limit',
+            'message' => 'offset requires limit to be set.',
+        ]);
+        exit;
+    }
+}
+
+$nextCursor = $_GET['next_cursor'] ?? null;
+if ($nextCursor !== null && $nextCursor !== '') {
+    $nextCursor = trim((string) $nextCursor);
+    $hasUnitId = $unitId !== null && $unitId !== '';
+    $hasFrom = $from !== null && $from !== '';
+    $hasTo = $to !== null && $to !== '';
+    if ($limit !== null || $offset !== null || $hasUnitId || $hasFrom || $hasTo) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_next_cursor_usage',
+            'message' => 'next_cursor cannot be combined with other query filters.',
+        ]);
+        exit;
+    }
+}
+
 if ($where) {
     $soql .= ' WHERE ' . implode(' AND ', $where);
 }
 
 $soql .= " LIMIT {$limit}";
 
-$cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($soql) . '.json';
+if ($offset !== null && $offset !== '') {
+    $soql .= " OFFSET {$offset}";
+}
+
+$cacheKey = $nextCursor ? "cursor:{$nextCursor}" : $soql;
+$cacheFile = __DIR__ . '/.cache/unit_query_' . sha1($cacheKey) . '.json';
 $cacheTtlSeconds = 300;
 
 // Token retrieval (preferred: protected file under web root)
@@ -299,6 +353,28 @@ if (is_readable($cacheFile)) {
 }
 
 $url = $instanceBase . "/services/data/{$apiVersion}/query?q=" . rawurlencode($soql);
+if ($nextCursor !== null && $nextCursor !== '') {
+    if (str_starts_with($nextCursor, 'https://')) {
+        if (!str_starts_with($nextCursor, $instanceBase)) {
+            http_response_code(400);
+            echo json_encode([
+                'error' => 'invalid_next_cursor',
+                'message' => 'next_cursor must match the configured Salesforce instance.',
+            ]);
+            exit;
+        }
+        $url = $nextCursor;
+    } elseif (str_starts_with($nextCursor, '/services/data/')) {
+        $url = $instanceBase . $nextCursor;
+    } else {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_next_cursor',
+            'message' => 'next_cursor must be a Salesforce nextRecordsUrl.',
+        ]);
+        exit;
+    }
+}
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
@@ -371,10 +447,37 @@ if ($httpCode < 200 || $httpCode >= 300) {
     exit;
 }
 
-// Success: pass-through Salesforce JSON
+// Success: pass-through Salesforce JSON (with pagination metadata if applicable)
 $cacheDir = dirname($cacheFile);
 if (!is_dir($cacheDir)) {
     mkdir($cacheDir, 0775, true);
+}
+$payload = json_decode($responseBody, true);
+if (is_array($payload)) {
+    $pagination = [];
+    $nextRecordsUrl = $payload['nextRecordsUrl'] ?? null;
+    $records = $payload['records'] ?? [];
+    $returnedCount = is_array($records) ? count($records) : 0;
+    if (is_string($nextRecordsUrl) && $nextRecordsUrl !== '') {
+        $pagination['next_cursor'] = $nextRecordsUrl;
+        $pagination['nextRecordsUrl'] = $nextRecordsUrl;
+        $pagination['has_more'] = true;
+    } elseif ($limit !== null) {
+        $offsetValue = $offset ?? 0;
+        $totalSize = $payload['totalSize'] ?? null;
+        if (is_int($totalSize) && ($offsetValue + $returnedCount) < $totalSize) {
+            $pagination['next_cursor'] = $offsetValue + $limit;
+            $pagination['has_more'] = true;
+        }
+    }
+    if ($pagination) {
+        $pagination['limit'] = $limit;
+        $pagination['offset'] = $offset ?? 0;
+        $pagination['returned'] = $returnedCount;
+        $pagination['total_size'] = $payload['totalSize'] ?? null;
+        $payload['pagination'] = $pagination;
+    }
+    $responseBody = json_encode($payload);
 }
 file_put_contents($cacheFile, $responseBody, LOCK_EX);
 http_response_code(200);
