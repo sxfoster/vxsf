@@ -57,6 +57,28 @@ header('Content-Type: application/json; charset=utf-8');
 $instanceBase = 'https://nosoftware-platform-1391.my.salesforce.com';
 $apiVersion = 'v61.0';
 
+function escapeSoqlString(string $value): string
+{
+    return str_replace(["\\", "'"], ["\\\\", "\\'"], $value);
+}
+
+function parseCsvValues(string $raw): array
+{
+    $parts = array_map('trim', explode(',', $raw));
+    $parts = array_filter($parts, static fn($value) => $value !== '');
+    return array_values(array_unique($parts));
+}
+
+function invalidRequest(string $error, string $message): void
+{
+    http_response_code(400);
+    echo json_encode([
+        'error' => $error,
+        'message' => $message,
+    ]);
+    exit;
+}
+
 // SOQL query (unencoded)
 $soql = "SELECT Id,Name,Status__c,Sub_Status__c,Unit_Offline__c,Model__c,GPS_IMEI__c,GPS_URL__c,"
     . "Spot_Ai_Serial_Number__c,Starlink_Serial_Number__c,Carbo_Gx_Serial_Number__c,LastModifiedDate "
@@ -68,12 +90,7 @@ $unitId = $_GET['unit_id'] ?? null;
 if ($unitId !== null && $unitId !== '') {
     $unitId = trim((string) $unitId);
     if (!preg_match('/^[a-zA-Z0-9]{15,18}$/', $unitId)) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_unit_id',
-            'message' => 'unit_id must be a 15-18 character Salesforce ID.',
-        ]);
-        exit;
+        invalidRequest('invalid_unit_id', 'unit_id must be a 15-18 character Salesforce ID.');
     }
     $where[] = "Id = '{$unitId}'";
 }
@@ -83,14 +100,10 @@ if ($from !== null && $from !== '') {
     $from = trim((string) $from);
     $fromDate = DateTime::createFromFormat('Y-m-d', $from);
     if (!$fromDate || $fromDate->format('Y-m-d') !== $from) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_from',
-            'message' => 'from must be in YYYY-MM-DD format.',
-        ]);
-        exit;
+        invalidRequest('invalid_from', 'from must be in YYYY-MM-DD format.');
     }
-    $where[] = "LastModifiedDate >= {$from}T00:00:00Z";
+    $fromLiteral = $fromDate->format('Y-m-d') . 'T00:00:00Z';
+    $where[] = "LastModifiedDate >= '{$fromLiteral}'";
 }
 
 $to = $_GET['to'] ?? null;
@@ -98,34 +111,117 @@ if ($to !== null && $to !== '') {
     $to = trim((string) $to);
     $toDate = DateTime::createFromFormat('Y-m-d', $to);
     if (!$toDate || $toDate->format('Y-m-d') !== $to) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_to',
-            'message' => 'to must be in YYYY-MM-DD format.',
-        ]);
-        exit;
+        invalidRequest('invalid_to', 'to must be in YYYY-MM-DD format.');
     }
-    $where[] = "LastModifiedDate <= {$to}T23:59:59Z";
+    $toLiteral = $toDate->format('Y-m-d') . 'T23:59:59Z';
+    $where[] = "LastModifiedDate <= '{$toLiteral}'";
+}
+
+$statusAllowlist = parseCsvValues((string) getenv('UNIT_QUERY_STATUS_ALLOWLIST'));
+$subStatusAllowlist = parseCsvValues((string) getenv('UNIT_QUERY_SUB_STATUS_ALLOWLIST'));
+$modelAllowlist = parseCsvValues((string) getenv('UNIT_QUERY_MODEL_ALLOWLIST'));
+
+$status = $_GET['status'] ?? null;
+if ($status !== null && $status !== '') {
+    $statusValues = parseCsvValues((string) $status);
+    if (!$statusValues) {
+        invalidRequest('invalid_status', 'status must include at least one value.');
+    }
+    if (!$statusAllowlist) {
+        invalidRequest('invalid_status', 'status filtering is not configured.');
+    }
+    $statusMap = array_change_key_case(array_flip($statusAllowlist), CASE_LOWER);
+    $normalized = [];
+    foreach ($statusValues as $value) {
+        $key = strtolower($value);
+        if (!array_key_exists($key, $statusMap)) {
+            invalidRequest('invalid_status', 'status contains an unsupported value.');
+        }
+        $normalized[] = $statusAllowlist[$statusMap[$key]];
+    }
+    $escaped = array_map(static fn($value) => "'" . escapeSoqlString($value) . "'", $normalized);
+    $where[] = 'Status__c IN (' . implode(',', $escaped) . ')';
+}
+
+$subStatus = $_GET['sub_status'] ?? null;
+if ($subStatus !== null && $subStatus !== '') {
+    $subStatusValues = parseCsvValues((string) $subStatus);
+    if (!$subStatusValues) {
+        invalidRequest('invalid_sub_status', 'sub_status must include at least one value.');
+    }
+    if (!$subStatusAllowlist) {
+        invalidRequest('invalid_sub_status', 'sub_status filtering is not configured.');
+    }
+    $subStatusMap = array_change_key_case(array_flip($subStatusAllowlist), CASE_LOWER);
+    $normalized = [];
+    foreach ($subStatusValues as $value) {
+        $key = strtolower($value);
+        if (!array_key_exists($key, $subStatusMap)) {
+            invalidRequest('invalid_sub_status', 'sub_status contains an unsupported value.');
+        }
+        $normalized[] = $subStatusAllowlist[$subStatusMap[$key]];
+    }
+    $escaped = array_map(static fn($value) => "'" . escapeSoqlString($value) . "'", $normalized);
+    $where[] = 'Sub_Status__c IN (' . implode(',', $escaped) . ')';
+}
+
+$model = $_GET['model'] ?? null;
+if ($model !== null && $model !== '') {
+    $modelValues = parseCsvValues((string) $model);
+    if (!$modelValues) {
+        invalidRequest('invalid_model', 'model must include at least one value.');
+    }
+    if (!$modelAllowlist) {
+        invalidRequest('invalid_model', 'model filtering is not configured.');
+    }
+    $modelMap = array_change_key_case(array_flip($modelAllowlist), CASE_LOWER);
+    $normalized = [];
+    foreach ($modelValues as $value) {
+        $key = strtolower($value);
+        if (!array_key_exists($key, $modelMap)) {
+            invalidRequest('invalid_model', 'model contains an unsupported value.');
+        }
+        $normalized[] = $modelAllowlist[$modelMap[$key]];
+    }
+    $escaped = array_map(static fn($value) => "'" . escapeSoqlString($value) . "'", $normalized);
+    $where[] = 'Model__c IN (' . implode(',', $escaped) . ')';
+}
+
+$unitOffline = $_GET['unit_offline'] ?? null;
+if ($unitOffline !== null && $unitOffline !== '') {
+    $unitOfflineValues = parseCsvValues((string) $unitOffline);
+    if (!$unitOfflineValues) {
+        invalidRequest('invalid_unit_offline', 'unit_offline must include at least one value.');
+    }
+    $normalized = [];
+    foreach ($unitOfflineValues as $value) {
+        $lower = strtolower($value);
+        if ($lower === 'true' || $lower === '1') {
+            $normalized[] = 'true';
+            continue;
+        }
+        if ($lower === 'false' || $lower === '0') {
+            $normalized[] = 'false';
+            continue;
+        }
+        invalidRequest('invalid_unit_offline', 'unit_offline must be true or false.');
+    }
+    $normalized = array_values(array_unique($normalized));
+    if (count($normalized) === 1) {
+        $where[] = 'Unit_Offline__c = ' . $normalized[0];
+    } else {
+        $where[] = 'Unit_Offline__c IN (' . implode(',', $normalized) . ')';
+    }
 }
 
 $limit = $_GET['limit'] ?? null;
 if ($limit !== null && $limit !== '') {
     if (filter_var($limit, FILTER_VALIDATE_INT) === false) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_limit',
-            'message' => 'limit must be an integer.',
-        ]);
-        exit;
+        invalidRequest('invalid_limit', 'limit must be an integer.');
     }
     $limit = (int) $limit;
     if ($limit < 1 || $limit > 2000) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_limit',
-            'message' => 'limit must be between 1 and 2000.',
-        ]);
-        exit;
+        invalidRequest('invalid_limit', 'limit must be between 1 and 2000.');
     }
 }
 
