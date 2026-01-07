@@ -4,7 +4,16 @@
 
 declare(strict_types=1);
 
-$expectedToken = getenv('UNIT_QUERY_API_KEY') ?: 'REPLACE_WITH_A_LONG_RANDOM_SECRET';
+$expectedToken = getenv('UNIT_QUERY_API_KEY');
+if (!$expectedToken || $expectedToken === 'REPLACE_WITH_A_LONG_RANDOM_SECRET') {
+    http_response_code(500);
+    header('Content-Type: application/json');
+    echo json_encode([
+        'error' => 'misconfigured_api_key',
+        'message' => 'UNIT_QUERY_API_KEY is missing or invalid.',
+    ]);
+    exit;
+}
 
 // Grab Authorization header
 $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
