@@ -155,6 +155,7 @@ $defaultFields = [
     'Unit_Offline__c',
     'LastModifiedDate',
 ];
+$defaultStatus = 'Deployed';
 
 $fieldsParam = $_GET['fields'] ?? null;
 if ($fieldsParam !== null && $fieldsParam !== '') {
@@ -194,6 +195,7 @@ if ($unitId !== null && $unitId !== '') {
 }
 
 $status = $_GET['status'] ?? null;
+$nextCursorParam = $_GET['next_cursor'] ?? null;
 if ($status !== null && $status !== '') {
     $statusValues = parseCsvParam(
         (string) $status,
@@ -205,6 +207,8 @@ if ($status !== null && $status !== '') {
         $statusValues
     );
     $where[] = "Status__c IN ('" . implode("','", $escaped) . "')";
+} elseif (($unitId === null || $unitId === '') && ($nextCursorParam === null || $nextCursorParam === '')) {
+    $where[] = "Status__c = '{$defaultStatus}'";
 }
 
 $subStatus = $_GET['sub_status'] ?? null;
@@ -313,11 +317,12 @@ if ($to !== null && $to !== '') {
 }
 
 $maxLimit = 200;
-$limit = $_GET['limit'] ?? null;
-if ($limit === null || $limit === '') {
+$limitParam = $_GET['limit'] ?? null;
+$limitProvided = $limitParam !== null && $limitParam !== '';
+if (!$limitProvided) {
     $limit = $maxLimit;
 } else {
-    if (filter_var($limit, FILTER_VALIDATE_INT) === false) {
+    if (filter_var($limitParam, FILTER_VALIDATE_INT) === false) {
         http_response_code(400);
         echo json_encode([
             'error' => 'invalid_limit',
@@ -325,7 +330,7 @@ if ($limit === null || $limit === '') {
         ]);
         exit;
     }
-    $limit = (int) $limit;
+    $limit = (int) $limitParam;
     if ($limit < 1 || $limit > $maxLimit) {
         http_response_code(400);
         echo json_encode([
@@ -355,7 +360,7 @@ if ($offset !== null && $offset !== '') {
         ]);
         exit;
     }
-    if ($limit === null || $limit === '') {
+    if (!$limitProvided) {
         http_response_code(400);
         echo json_encode([
             'error' => 'offset_requires_limit',
@@ -365,12 +370,13 @@ if ($offset !== null && $offset !== '') {
     }
 }
 
-$nextCursor = $_GET['next_cursor'] ?? null;
+$nextCursor = $nextCursorParam;
 if ($nextCursor !== null && $nextCursor !== '') {
     $nextCursor = trim((string) $nextCursor);
     $hasUnitId = $unitId !== null && $unitId !== '';
     $hasFrom = $from !== null && $from !== '';
     $hasTo = $to !== null && $to !== '';
+    if ($limitProvided || $offset !== null || $hasUnitId || $hasFrom || $hasTo) {
     $hasStatus = $status !== null && $status !== '';
     $hasSubStatus = $subStatus !== null && $subStatus !== '';
     $hasModel = $model !== null && $model !== '';
