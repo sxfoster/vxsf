@@ -26,6 +26,59 @@ function normalizeFilterValue(mixed $value): mixed
     return mb_substr($value, 0, 200);
 }
 
+function respondBadRequest(string $error, string $message): void
+{
+    http_response_code(400);
+    echo json_encode([
+        'error' => $error,
+        'message' => $message,
+    ]);
+    exit;
+}
+
+function parseCsvValues(?string $value, string $paramName, string $errorCode): ?array
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $parts = explode(',', (string) $value);
+    $values = [];
+    foreach ($parts as $part) {
+        $trimmed = trim($part);
+        if ($trimmed === '') {
+            respondBadRequest(
+                $errorCode,
+                "{$paramName} must be a comma-separated list of values."
+            );
+        }
+        $values[] = $trimmed;
+    }
+    return array_values(array_unique($values));
+}
+
+function requireAllowlistValues(array $values, array $allowlist, string $paramName, string $errorCode): array
+{
+    if (!$allowlist) {
+        respondBadRequest(
+            $errorCode,
+            "{$paramName} values are not configured on the server."
+        );
+    }
+    $invalid = array_diff($values, $allowlist);
+    if ($invalid) {
+        respondBadRequest(
+            $errorCode,
+            "Unknown {$paramName} value(s): " . implode(', ', $invalid) . '.'
+        );
+    }
+    return $values;
+}
+
+function escapeSoqlString(string $value): string
+{
+    return str_replace(['\\', "'"], ['\\\\', "\\'"], $value);
+}
+
 function extractRecordCount(mixed $payload): ?int
 {
     if (!is_array($payload)) {
@@ -120,6 +173,14 @@ $allowedFields = [
     'LastModifiedDate',
     'Model__c',
 ];
+$allowedStatusValues = array_values(array_filter(
+    array_map('trim', explode(',', (string) getenv('UNIT_QUERY_STATUS_ALLOWLIST'))),
+    'strlen'
+));
+$allowedSubStatusValues = array_values(array_filter(
+    array_map('trim', explode(',', (string) getenv('UNIT_QUERY_SUB_STATUS_ALLOWLIST'))),
+    'strlen'
+));
 $defaultFields = [
     'Id',
     'Name',
@@ -131,24 +192,16 @@ $defaultFields = [
 
 $fieldsParam = $_GET['fields'] ?? null;
 if ($fieldsParam !== null && $fieldsParam !== '') {
-    $requestedFields = array_filter(array_map('trim', explode(',', (string) $fieldsParam)), 'strlen');
+    $requestedFields = parseCsvValues((string) $fieldsParam, 'fields', 'invalid_fields');
     if (!$requestedFields) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_fields',
-            'message' => 'fields must include at least one field name.',
-        ]);
-        exit;
+        respondBadRequest('invalid_fields', 'fields must include at least one field name.');
     }
-    $unknownFields = array_diff($requestedFields, $allowedFields);
-    if ($unknownFields) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_fields',
-            'message' => 'Unknown field(s): ' . implode(', ', $unknownFields) . '.',
-        ]);
-        exit;
-    }
+    $requestedFields = requireAllowlistValues(
+        $requestedFields,
+        $allowedFields,
+        'field',
+        'invalid_fields'
+    );
     $selectFields = $requestedFields;
 } else {
     $selectFields = $defaultFields;
@@ -174,37 +227,33 @@ if ($unitId !== null && $unitId !== '') {
 
 $status = $_GET['status'] ?? null;
 if ($status !== null && $status !== '') {
-    $statusValues = array_filter(array_map('trim', explode(',', (string) $status)), 'strlen');
+    $statusValues = parseCsvValues((string) $status, 'status', 'invalid_status');
     if (!$statusValues) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_status',
-            'message' => 'status must be a comma-separated list of values.',
-        ]);
-        exit;
+        respondBadRequest('invalid_status', 'status must be a comma-separated list of values.');
     }
-    $escaped = array_map(
-        static fn (string $value): string => str_replace("'", "\\'", $value),
-        $statusValues
+    $statusValues = requireAllowlistValues(
+        $statusValues,
+        $allowedStatusValues,
+        'status',
+        'invalid_status'
     );
+    $escaped = array_map('escapeSoqlString', $statusValues);
     $where[] = "Status__c IN ('" . implode("','", $escaped) . "')";
 }
 
 $subStatus = $_GET['sub_status'] ?? null;
 if ($subStatus !== null && $subStatus !== '') {
-    $subStatusValues = array_filter(array_map('trim', explode(',', (string) $subStatus)), 'strlen');
+    $subStatusValues = parseCsvValues((string) $subStatus, 'sub_status', 'invalid_sub_status');
     if (!$subStatusValues) {
-        http_response_code(400);
-        echo json_encode([
-            'error' => 'invalid_sub_status',
-            'message' => 'sub_status must be a comma-separated list of values.',
-        ]);
-        exit;
+        respondBadRequest('invalid_sub_status', 'sub_status must be a comma-separated list of values.');
     }
-    $escaped = array_map(
-        static fn (string $value): string => str_replace("'", "\\'", $value),
-        $subStatusValues
+    $subStatusValues = requireAllowlistValues(
+        $subStatusValues,
+        $allowedSubStatusValues,
+        'sub_status',
+        'invalid_sub_status'
     );
+    $escaped = array_map('escapeSoqlString', $subStatusValues);
     $where[] = "Sub_Status__c IN ('" . implode("','", $escaped) . "')";
 }
 
@@ -236,7 +285,7 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
             exit;
         }
         $dateUtc = $date->setTimezone(new DateTimeZone('UTC'));
-        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+        $where[] = "LastModifiedDate >= '" . $dateUtc->format('Y-m-d\TH:i:s\Z') . "'";
     } elseif (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/', $modifiedSince)) {
         try {
             $dateTime = new DateTimeImmutable($modifiedSince);
@@ -252,7 +301,7 @@ if ($modifiedSince !== null && $modifiedSince !== '') {
             exit;
         }
         $dateUtc = $dateTime->setTimezone(new DateTimeZone('UTC'));
-        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+        $where[] = "LastModifiedDate >= '" . $dateUtc->format('Y-m-d\TH:i:s\Z') . "'";
     } else {
         http_response_code(400);
         echo json_encode([
@@ -275,7 +324,7 @@ if ($from !== null && $from !== '') {
         ]);
         exit;
     }
-    $where[] = "LastModifiedDate >= {$from}T00:00:00Z";
+    $where[] = "LastModifiedDate >= '{$from}T00:00:00Z'";
 }
 
 $to = $_GET['to'] ?? null;
@@ -290,7 +339,7 @@ if ($to !== null && $to !== '') {
         ]);
         exit;
     }
-    $where[] = "LastModifiedDate <= {$to}T23:59:59Z";
+    $where[] = "LastModifiedDate <= '{$to}T23:59:59Z'";
 }
 
 $maxLimit = 200;
