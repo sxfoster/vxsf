@@ -58,9 +58,50 @@ $instanceBase = 'https://nosoftware-platform-1391.my.salesforce.com';
 $apiVersion = 'v61.0';
 
 // SOQL query (unencoded)
-$soql = "SELECT Id,Name,Status__c,Sub_Status__c,Unit_Offline__c,Model__c,GPS_IMEI__c,GPS_URL__c,"
-    . "Spot_Ai_Serial_Number__c,Starlink_Serial_Number__c,Carbo_Gx_Serial_Number__c,LastModifiedDate "
-    . "FROM Unit__c";
+$allowedFields = [
+    'Id',
+    'Name',
+    'Status__c',
+    'Sub_Status__c',
+    'Unit_Offline__c',
+    'LastModifiedDate',
+    'Model__c',
+];
+$defaultFields = [
+    'Id',
+    'Name',
+    'Status__c',
+    'Sub_Status__c',
+    'Unit_Offline__c',
+    'LastModifiedDate',
+];
+
+$fieldsParam = $_GET['fields'] ?? null;
+if ($fieldsParam !== null && $fieldsParam !== '') {
+    $requestedFields = array_filter(array_map('trim', explode(',', (string) $fieldsParam)), 'strlen');
+    if (!$requestedFields) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_fields',
+            'message' => 'fields must include at least one field name.',
+        ]);
+        exit;
+    }
+    $unknownFields = array_diff($requestedFields, $allowedFields);
+    if ($unknownFields) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_fields',
+            'message' => 'Unknown field(s): ' . implode(', ', $unknownFields) . '.',
+        ]);
+        exit;
+    }
+    $selectFields = $requestedFields;
+} else {
+    $selectFields = $defaultFields;
+}
+
+$soql = 'SELECT ' . implode(',', $selectFields) . ' FROM Unit__c';
 
 $where = [];
 
@@ -76,6 +117,97 @@ if ($unitId !== null && $unitId !== '') {
         exit;
     }
     $where[] = "Id = '{$unitId}'";
+}
+
+$status = $_GET['status'] ?? null;
+if ($status !== null && $status !== '') {
+    $statusValues = array_filter(array_map('trim', explode(',', (string) $status)), 'strlen');
+    if (!$statusValues) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_status',
+            'message' => 'status must be a comma-separated list of values.',
+        ]);
+        exit;
+    }
+    $escaped = array_map(
+        static fn (string $value): string => str_replace("'", "\\'", $value),
+        $statusValues
+    );
+    $where[] = "Status__c IN ('" . implode("','", $escaped) . "')";
+}
+
+$subStatus = $_GET['sub_status'] ?? null;
+if ($subStatus !== null && $subStatus !== '') {
+    $subStatusValues = array_filter(array_map('trim', explode(',', (string) $subStatus)), 'strlen');
+    if (!$subStatusValues) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_sub_status',
+            'message' => 'sub_status must be a comma-separated list of values.',
+        ]);
+        exit;
+    }
+    $escaped = array_map(
+        static fn (string $value): string => str_replace("'", "\\'", $value),
+        $subStatusValues
+    );
+    $where[] = "Sub_Status__c IN ('" . implode("','", $escaped) . "')";
+}
+
+$offline = $_GET['offline'] ?? null;
+if ($offline !== null && $offline !== '') {
+    $normalized = strtolower(trim((string) $offline));
+    if (!in_array($normalized, ['true', 'false'], true)) {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_offline',
+            'message' => 'offline must be true or false.',
+        ]);
+        exit;
+    }
+    $where[] = "Unit_Offline__c = {$normalized}";
+}
+
+$modifiedSince = $_GET['modified_since'] ?? null;
+if ($modifiedSince !== null && $modifiedSince !== '') {
+    $modifiedSince = trim((string) $modifiedSince);
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $modifiedSince)) {
+        $date = DateTimeImmutable::createFromFormat('Y-m-d', $modifiedSince);
+        if (!$date || $date->format('Y-m-d') !== $modifiedSince) {
+            http_response_code(400);
+            echo json_encode([
+                'error' => 'invalid_modified_since',
+                'message' => 'modified_since must be a valid date in YYYY-MM-DD format.',
+            ]);
+            exit;
+        }
+        $dateUtc = $date->setTimezone(new DateTimeZone('UTC'));
+        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+    } elseif (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/', $modifiedSince)) {
+        try {
+            $dateTime = new DateTimeImmutable($modifiedSince);
+        } catch (Exception $exception) {
+            $dateTime = false;
+        }
+        if (!$dateTime) {
+            http_response_code(400);
+            echo json_encode([
+                'error' => 'invalid_modified_since',
+                'message' => 'modified_since must be a valid ISO datetime.',
+            ]);
+            exit;
+        }
+        $dateUtc = $dateTime->setTimezone(new DateTimeZone('UTC'));
+        $where[] = 'LastModifiedDate >= ' . $dateUtc->format('Y-m-d\TH:i:s\Z');
+    } else {
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'invalid_modified_since',
+            'message' => 'modified_since must be a date (YYYY-MM-DD) or ISO datetime.',
+        ]);
+        exit;
+    }
 }
 
 $from = $_GET['from'] ?? null;
