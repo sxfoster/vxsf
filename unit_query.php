@@ -57,54 +57,6 @@ function logUnitQuery(array $filters, ?int $recordCount, bool $cached): void
     error_log($encoded);
 }
 
-$expectedToken = getenv('UNIT_QUERY_API_KEY');
-if (!$expectedToken || $expectedToken === 'REPLACE_WITH_A_LONG_RANDOM_SECRET') {
-    http_response_code(500);
-    header('Content-Type: application/json');
-    echo json_encode([
-        'error' => 'misconfigured_api_key',
-        'message' => 'UNIT_QUERY_API_KEY is missing or invalid.',
-    ]);
-    exit;
-}
-
-// Grab Authorization header
-$auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
-if (!$auth && function_exists('getallheaders')) {
-    $headers = getallheaders();
-    foreach ($headers as $headerName => $headerValue) {
-        if (strcasecmp($headerName, 'Authorization') === 0) {
-            $auth = (string) $headerValue;
-            break;
-        }
-    }
-}
-if (!$auth && isset($_SERVER['Authorization'])) {
-    $auth = (string) $_SERVER['Authorization'];
-}
-if (!$auth) {
-    http_response_code(401);
-    header('Content-Type: application/json');
-    echo json_encode(['error' => 'Missing Authorization header']);
-    exit;
-}
-
-// Expect: Authorization: Bearer <token>
-if (!preg_match('/^Bearer\s+(.+)$/i', trim($auth), $m)) {
-    http_response_code(401);
-    header('Content-Type: application/json');
-    echo json_encode(['error' => 'Invalid Authorization format']);
-    exit;
-}
-
-$token = trim($m[1]);
-if (!hash_equals($expectedToken, $token)) {
-    http_response_code(403);
-    header('Content-Type: application/json');
-    echo json_encode(['error' => 'Forbidden']);
-    exit;
-}
-
 header('Content-Type: application/json; charset=utf-8');
 
 $instanceBase = 'https://nosoftware-platform-1391.my.salesforce.com';
