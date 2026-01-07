@@ -8,6 +8,18 @@ $expectedToken = getenv('UNIT_QUERY_API_KEY') ?: 'REPLACE_WITH_A_LONG_RANDOM_SEC
 
 // Grab Authorization header
 $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+if (!$auth && function_exists('getallheaders')) {
+    $headers = getallheaders();
+    foreach ($headers as $headerName => $headerValue) {
+        if (strcasecmp($headerName, 'Authorization') === 0) {
+            $auth = (string) $headerValue;
+            break;
+        }
+    }
+}
+if (!$auth && isset($_SERVER['Authorization'])) {
+    $auth = (string) $_SERVER['Authorization'];
+}
 if (!$auth) {
     http_response_code(401);
     header('Content-Type: application/json');
